@@ -1,6 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startCloudflaredTunnel } from "../src/relay/cloudflared.js";
 
 function createMockChildProcess() {
@@ -41,21 +44,37 @@ function createMockChildProcess() {
 }
 
 describe("startCloudflaredTunnel", () => {
-  it("resolves with the trycloudflare.com URL emitted on stderr and stops cleanly", async () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.length = 0;
+  });
+
+  it("waits for both trycloudflare.com URL and Registered tunnel connection before resolving", async () => {
     const mockProc = createMockChildProcess();
+    let resolved = false;
 
     const handlePromise = startCloudflaredTunnel("http://127.0.0.1:8765", {
       spawnFn: () => mockProc,
       timeoutMs: 2000,
+    }).then((h) => {
+      resolved = true;
+      return h;
     });
 
     mockProc.stderr.emit(
       "data",
-      Buffer.from("INF +------------------------------------------------------------+\n"),
+      Buffer.from("INF |  https://gentle-river-42.trycloudflare.com                 |\n"),
     );
+    await new Promise((r) => setTimeout(r, 15));
+    expect(resolved).toBe(false);
+
     mockProc.stderr.emit(
       "data",
-      Buffer.from("INF |  https://gentle-river-42.trycloudflare.com                 |\n"),
+      Buffer.from("INF Registered tunnel connection connIndex=0 connection=abc\n"),
     );
 
     const handle = await handlePromise;
@@ -65,6 +84,52 @@ describe("startCloudflaredTunnel", () => {
 
     await handle.stop();
     expect(mockProc.killed).toBe(true);
+  });
+
+  it("passes --protocol http2 when specified and writes logs to logFile even after resolve", async () => {
+    const mockProc = createMockChildProcess();
+    let capturedArgs: string[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "acep-cf-log-"));
+    tempDirs.push(dir);
+    const logFile = join(dir, "cloudflared.log");
+
+    const handlePromise = startCloudflaredTunnel("http://127.0.0.1:8765", {
+      protocol: "http2",
+      logFile,
+      spawnFn: (_cmd, args) => {
+        capturedArgs = args;
+        return mockProc;
+      },
+      timeoutMs: 2000,
+    });
+
+    expect(capturedArgs).toEqual([
+      "tunnel",
+      "--no-autoupdate",
+      "--protocol",
+      "http2",
+      "--url",
+      "http://127.0.0.1:8765",
+    ]);
+
+    mockProc.stderr.emit(
+      "data",
+      Buffer.from("INF | https://http2-test-123.trycloudflare.com |\n"),
+    );
+    mockProc.stderr.emit(
+      "data",
+      Buffer.from("INF Registered tunnel connection connIndex=0\n"),
+    );
+
+    const handle = await handlePromise;
+    expect(handle.publicUrl).toBe("https://http2-test-123.trycloudflare.com");
+
+    mockProc.stderr.emit("data", Buffer.from("INF post-resolve heartbeat\n"));
+    await handle.stop();
+
+    const content = readFileSync(logFile, "utf8");
+    expect(content).toContain("https://http2-test-123.trycloudflare.com");
+    expect(content).toContain("post-resolve heartbeat");
   });
 
   it("does not misidentify api.trycloudflare.com error logs as a valid tunnel URL", async () => {
@@ -84,7 +149,7 @@ describe("startCloudflaredTunnel", () => {
     mockProc.emit("exit", 1, null);
 
     await expect(handlePromise).rejects.toThrow(
-      /exited before providing a tunnel URL/,
+      /exited before tunnel became ready/,
     );
   });
 
@@ -114,7 +179,7 @@ describe("startCloudflaredTunnel", () => {
     mockProc.stderr.emit("data", Buffer.from("ERR failed to connect"));
     mockProc.emit("exit", 1, null);
 
-    await expect(handlePromise).rejects.toThrow(/exited before providing a tunnel URL/);
+    await expect(handlePromise).rejects.toThrow(/exited before tunnel became ready/);
   });
 
   it("rejects and stops process on timeout", async () => {
