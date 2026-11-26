@@ -1,16 +1,35 @@
-# agent-tunnel (ACEP / MCP Bridge)
+# acep-agent-tunnel (ACEP / MCP Bridge)
 
-OpenCode, Codex CLI, Gemini CLI, Antigravity などのエージェントセッション同士を繋ぎ、過不足ないコンテキストだけを構造化して対話・引き継ぎするための MCP ブリッジです。
+OpenCode、Codex CLI、Gemini CLI、Claude Code、Antigravity、GitHub Copilot などの **AIエージェントの「生きているセッション」同士を繋ぎ、過不足ないコンテキストだけを構造化して対話・引き継ぎする** ための MCP サーバー＆プロトコル（ACEP: Agent Context Exchange Protocol）実装です。
 
-## ビルド・テスト
+## 何ができるのか？
+
+1. **同一マシン・個人間でのセッション引き継ぎ（`trusted` モード）**
+   - 例：Codex CLI で進めていた作業を、別のエージェント（Gemini CLI や Antigravity 等）へ「どこまで終わったか・変更したファイル・ハマりポイント」を会話して引き継ぐ。
+2. **別マシン・SNS 越しの安全相談（`public` モード ＋ `acep+nostr://`）**
+   - 例：「Gemma 100 tok/s 出た！」と投稿した人（ホスト）が共有 URI を発行し、別の人（シーカー）が自分のエージェントから繋いで「なぜ自分の環境は 50 tok/s しか出ないか」を AI 同士の `QUERY` ⇄ `NEED_INFO` ⇄ `ANSWER` で自動特定する。
+
+```text
+[Agent A (Host)] ──(MCP)──▶ [agent-tunnel] ──(Nostr NIP-44 / WebSocket / Cloudflared)──▶ [agent-tunnel] ◀──(MCP)── [Agent B (Seeker)]
+```
+
+---
+
+## セットアップ
+
+Node.js 20+ が必要です。
 
 ```bash
+git clone https://github.com/hirokidesuyo/acep-agent-tunnel.git
+cd acep-agent-tunnel
 npm install
 npm run build
 npm test
 ```
 
-## MCPサーバーとしての登録例
+### MCP サーバーとしての登録例
+
+お使いの MCP 対応エージェント設定ファイルに以下を追加してください。
 
 ```json
 {
@@ -23,24 +42,62 @@ npm test
 }
 ```
 
-## 提供される MCP ツール
+---
 
-- `open_channel`: 相談用チャネルを開設し、共有可能な `connect_uri` を発行する
-- `wait_for_peer`: 接続先ピアからの ACEP メッセージ受信を待機する
-- `reply_to_peer`: ピアへ `NEED_INFO` / `ANSWER` / `CLOSE` を返信する
-- `connect_channel`: `connect_uri` を指定してホストのチャネルに接続する
-- `ask_peer`: ホストへ `QUERY` または `CLOSE` を送信し、応答を待機する
+## 使い方（エージェントへの指示例）
 
-## 外部公開（Nostr / cloudflared Quick Tunnel / リレー単独起動）
+### パターン1：Nostr 経由で別マシン・他者と安全に繋ぐ（推奨・穴あけ不要）
 
-VM やインターネット越しに公開する場合は、以下のいずれかを利用できます。
+* **ホスト側（教える側）の指示例**：
+  > 「今までの作業文脈を持って、`open_channel` を `transport: "nostr"`、`trust_mode: "public"` で開いて、発行された `connect_uri` を教えて。そのあと `wait_for_peer` で待機して質問に答えて。」
+  - `acep+nostr://<pubkey>/<channel_id>?token=...` 形式の URI が発行されます。
+  - 通信はセッションごとの使い捨て鍵ペア＋ **NIP-44 E2E 暗号化**＋リレー非保存の一時イベント（Kind `21337`）で行われ、`HANDSHAKE` 内の招待トークンが一致しない相手は拒否されます。
 
-1. **Nostr トランスポート（`acep+nostr://`、穴あけ不要・E2E暗号化）**
-   - `open_channel` で `transport: "nostr"` を指定すると、セッションごとの使い捨て鍵ペアと NIP-44 暗号化を用いた `acep+nostr://...` URI を発行します（デフォルトは公開リレー、または `nostr_relays` で指定）。
-2. **`cloudflared` 自動連携（アカウント不要）**
-   - ホスト側マシンに `cloudflared` をインストールした状態で、`open_channel` 呼び出し時に `expose_public: true` を指定すると、自動で `aceps://*.trycloudflare.com/...` 形式の公開接続URIを発行します。
-   - QUIC が通らないネットワークでは環境変数 `ACEP_CLOUDFLARED_PROTOCOL=http2` を設定できます。また `ACEP_CLOUDFLARED_LOG_FILE=/tmp/cloudflared.log` でトンネルのログをファイルに保存できます。
-3. **外部公開用リレーの単独起動**
+* **シーカー側（聞く側）の指示例**：
+  > 「この URI に `connect_channel` で繋いで、自分の環境で速度が出ない原因を `ask_peer` で聞いてみて。必要な情報を聞かれたら調べて答えて。」
+
+※ メインのチャット画面を止めたくない場合は、**サブエージェント** に作業サマリーを渡して `wait_for_peer` ループを任せることもできます。
+
+### パターン2：同一マシン内の別ツールへ引き継ぐ
+
+* ホスト側で `open_channel` を `trust_mode: "trusted"`（`transport` 省略でローカル WebSocket リレー自動起動）で開き、出てきた `acep://127.0.0.1:...` を別ツールのセッションへ渡して `connect_channel` します。
+
+---
+
+## 提供される MCP ツール（5つ）
+
+| ツール名 | 役割 |
+| :--- | :--- |
+| `open_channel` | 相談用チャネルを開設し、共有可能な `connect_uri` を発行する |
+| `wait_for_peer` | 相手からの ACEP メッセージ（`HANDSHAKE` / `QUERY` 等）を待機して受け取る |
+| `reply_to_peer` | `NEED_INFO`（不足情報の逆質問）/ `ANSWER`（回答）/ `CLOSE` を返信する |
+| `connect_channel` | `connect_uri`（`acep://`, `aceps://`, `acep+nostr://`）へ接続し `HANDSHAKE` を送る |
+| `ask_peer` | ホストへ `QUERY` または `CLOSE` を送り、応答を待機する |
+
+---
+
+## セキュリティ境界（`trusted` vs `public`）
+
+* **`trusted`（自分用・引き継ぎ向け）**: ローカルパスや設定内容をそのまま送受信します。
+* **`public`（他者共有向け）**:
+  - 送信前にサニタイザが自動で走り、API キー（`sk-...`, `ghp_...`, `AIza...` 等）、`Bearer` トークン、秘密鍵ブロック、およびホームディレクトリの絶対パス（`/Users/<name>/...`, `C:\Users\<name>\...` → `~/...`）を自動マスクします（オブジェクトのキーも対象）。
+  - Nostr トランスポート利用時の 1 メッセージ上限は NIP-44 仕様により **65,535 bytes**（UTF-8）です。
+
+---
+
+## 環境変数・その他の公開手段
+
+| 環境変数 / オプション | 説明 |
+| :--- | :--- |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` | WebSocket リレーおよび Nostr リレーへの接続時に HTTP `CONNECT` プロキシを自動利用します（`127.0.0.1` / `localhost` / `::1` は自動バイパス）。 |
+| `expose_public: true`（`open_channel` 引数） | ローカルに `cloudflared` が導入されていれば Quick Tunnel（`aceps://*.trycloudflare.com/...`）を自動起動します。 |
+| `ACEP_CLOUDFLARED_PROTOCOL` | `cloudflared` の通信プロトコルを指定します（`auto` / `quic` / `http2`）。QUIC が通らない環境では `http2` が有効です。 |
+| `ACEP_CLOUDFLARED_LOG_FILE` | `cloudflared` の標準出力・標準エラー出力を追記保存するログファイルパスを指定します。 |
+
+### 外部公開用リレーの単独起動（任意）
+
+VPS 等で独自に WebSocket リレーを立てる場合は以下で起動できます。
+
 ```bash
 node dist/index.js relay --port 8765
 ```
