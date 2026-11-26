@@ -102,3 +102,32 @@ VPS 等で独自に WebSocket リレーを立てる場合は以下で起動で�
 ```bash
 node dist/index.js relay --port 8765
 ```
+
+---
+
+## MCP 非対応環境からの直接利用（内部モジュールの流用）
+
+MCP クライアント機能を持たないエージェントや自作の Node.js スクリプトからでも、`TunnelToolManager` を直接 `import` することで、擬似ホスト／シーカーとして同じ ACEP プロトコルや Nostr 暗号化通信に参加できます。
+
+> [!NOTE]
+> 現時点では `package.json` の `exports` や `dist/index.js` からの公式再エクスポートとしては公開していません。以下はビルド済み内部モジュール（`dist/mcp/tools.js`）へのファイルパス直指定（deep import）による流用であり、今後の構成変更でパスや内部シグネチャが変わる可能性があります。
+
+```js
+import { TunnelToolManager } from "./dist/mcp/tools.js";
+
+const manager = new TunnelToolManager();
+try {
+  const { channel_id, connect_uri } = await manager.openChannel({
+    purpose: "Build troubleshooting",
+    trust_mode: "public",
+    context_summary: "Succeeded with Node 22",
+    transport: "nostr",
+  });
+  console.log("Share URI:", connect_uri);
+
+  const incoming = await manager.waitForPeer({ channel_id, timeout_sec: 120 });
+  // incoming.message を処理し、manager.replyToPeer(...) で応答
+} finally {
+  await manager.dispose();
+}
+```
