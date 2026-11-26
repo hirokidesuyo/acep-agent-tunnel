@@ -10,7 +10,14 @@ import {
   type PublicTunnelHandle,
 } from "../relay/cloudflared.js";
 import { TunnelClient } from "../client/tunnel-client.js";
+import {
+  DEFAULT_NOSTR_RELAYS,
+  NostrTunnelClient,
+} from "../client/nostr-client.js";
+import type { TunnelTransport } from "../client/transport.js";
 import { sanitizeForPublic } from "../security/sanitizer.js";
+
+export type ChannelTransportMode = "relay" | "nostr";
 
 export type StartPublicTunnelFn = (
   localHttpUrl: string,
@@ -25,7 +32,7 @@ interface ManagedChannel {
   role: "host" | "seeker";
   trust_mode: TrustMode;
   purpose: string;
-  client: TunnelClient;
+  client: TunnelTransport;
 }
 
 export interface WaitResult {
@@ -127,7 +134,7 @@ export class TunnelToolManager {
   }
 
   private async awaitPeerMessage(
-    client: TunnelClient,
+    client: TunnelTransport,
     timeoutSec: number,
   ): Promise<WaitResult> {
     const msg = await client.waitForMessage(timeoutSec * 1000);
@@ -147,7 +154,56 @@ export class TunnelToolManager {
     context_summary: string;
     relay_url?: string;
     expose_public?: boolean;
+    transport?: ChannelTransportMode;
+    nostr_relays?: string[];
   }): Promise<{ channel_id: string; join_token: string; connect_uri: string }> {
+    const transportMode: ChannelTransportMode = args.transport ?? "relay";
+    if (transportMode === "nostr") {
+      if (args.relay_url || args.expose_public) {
+        throw new Error(
+          "Cannot combine transport=\"nostr\" with relay_url or expose_public",
+        );
+      }
+      const rawRelays =
+        args.nostr_relays && args.nostr_relays.length > 0
+          ? args.nostr_relays
+          : DEFAULT_NOSTR_RELAYS;
+      const relays = rawRelays.map((r) => this.normalizeRelayUrl(r).relayUrl);
+      const channelId = `ch_${randomBytes(6).toString("hex")}`;
+      const joinToken = `tok_${randomBytes(12).toString("hex")}`;
+      const purpose =
+        args.trust_mode === "public"
+          ? sanitizeForPublic(args.purpose).sanitized
+          : args.purpose;
+
+      const nostrClient = new NostrTunnelClient();
+      await nostrClient.connect({
+        relays,
+        role: "host",
+        channelId,
+        joinToken,
+      });
+
+      this.channels.set(channelId, {
+        channel_id: channelId,
+        role: "host",
+        trust_mode: args.trust_mode,
+        purpose,
+        client: nostrClient,
+      });
+
+      const relayParams = relays
+        .map((r) => `relay=${encodeURIComponent(r)}`)
+        .join("&");
+      const connectUri = `acep+nostr://${nostrClient.pubkey}/${channelId}?token=${joinToken}&trust=${args.trust_mode}&purpose=${encodeURIComponent(purpose)}&${relayParams}`;
+
+      return {
+        channel_id: channelId,
+        join_token: joinToken,
+        connect_uri: connectUri,
+      };
+    }
+
     if (args.relay_url && args.expose_public) {
       throw new Error(
         "Cannot specify both relay_url and expose_public=true",
@@ -234,13 +290,13 @@ export class TunnelToolManager {
       payload,
     });
 
-    ch.client.send(msg);
+    await ch.client.send(msg);
     return { sent: true, message_id: msg.message_id, warnings };
   }
 
   /**
-   * Connects as a seeker to an existing channel using an `acep://` or `aceps://` URI
-   * and sends the initial `HANDSHAKE` message.
+   * Connects as a seeker to an existing channel using an `acep://`, `aceps://`,
+   * or `acep+nostr://` URI and sends the initial `HANDSHAKE` message.
    */
   async connectChannel(args: {
     connect_uri: string;
@@ -251,14 +307,16 @@ export class TunnelToolManager {
     } catch {
       throw new Error(`Invalid connect_uri: ${args.connect_uri}`);
     }
-    if (uri.protocol !== "acep:" && uri.protocol !== "aceps:") {
+    if (
+      uri.protocol !== "acep:" &&
+      uri.protocol !== "aceps:" &&
+      uri.protocol !== "acep+nostr:"
+    ) {
       throw new Error(
-        `Invalid connect_uri protocol "${uri.protocol}": expected "acep:" or "aceps:"`,
+        `Invalid connect_uri protocol "${uri.protocol}": expected "acep:", "aceps:", or "acep+nostr:"`,
       );
     }
 
-    const wsProtocol = uri.protocol === "aceps:" ? "wss:" : "ws:";
-    const relayUrl = `${wsProtocol}//${uri.host}`;
     const channelId = uri.pathname.replace(/^\//, "");
     const token = uri.searchParams.get("token");
     const rawTrust = uri.searchParams.get("trust");
@@ -275,13 +333,37 @@ export class TunnelToolManager {
       this.channels.delete(channelId);
     }
 
-    const client = new TunnelClient();
-    await client.connect({
-      relayUrl,
-      channelId,
-      token,
-      role: "seeker",
-    });
+    let client: TunnelTransport;
+    if (uri.protocol === "acep+nostr:") {
+      const hostPubkey = uri.hostname;
+      const rawRelays = uri.searchParams.getAll("relay");
+      if (!hostPubkey || rawRelays.length === 0) {
+        throw new Error(
+          "Invalid acep+nostr URI: missing host pubkey or relay parameter",
+        );
+      }
+      const relays = rawRelays.map((r) => this.normalizeRelayUrl(r).relayUrl);
+      const nostrClient = new NostrTunnelClient();
+      await nostrClient.connect({
+        relays,
+        role: "seeker",
+        channelId,
+        joinToken: token,
+        peerPubkey: hostPubkey,
+      });
+      client = nostrClient;
+    } else {
+      const wsProtocol = uri.protocol === "aceps:" ? "wss:" : "ws:";
+      const relayUrl = `${wsProtocol}//${uri.host}`;
+      const wsClient = new TunnelClient();
+      await wsClient.connect({
+        relayUrl,
+        channelId,
+        token,
+        role: "seeker",
+      });
+      client = wsClient;
+    }
 
     const handshake = createAcepMessage({
       channel_id: channelId,
@@ -294,7 +376,7 @@ export class TunnelToolManager {
       },
     });
     try {
-      client.send(handshake);
+      await client.send(handshake);
     } catch (err) {
       await client.close();
       throw err;
@@ -349,7 +431,7 @@ export class TunnelToolManager {
       type: args.type,
       payload,
     });
-    ch.client.send(msg);
+    await ch.client.send(msg);
 
     if (args.type === "CLOSE") {
       return { status: "message", message: msg };

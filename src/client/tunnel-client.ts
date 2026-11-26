@@ -1,8 +1,9 @@
 import { WebSocket } from "ws";
 import { AcepMessageSchema, type AcepMessage, type SenderRole } from "../protocol/types.js";
 import { createProxyAgent, resolveProxyUrl } from "./proxy-agent.js";
+import type { TunnelTransport } from "./transport.js";
 
-export class TunnelClient {
+export class TunnelClient implements TunnelTransport {
   private ws: WebSocket | null = null;
   private queue: AcepMessage[] = [];
   private waiters: Array<(msg: AcepMessage | null) => void> = [];

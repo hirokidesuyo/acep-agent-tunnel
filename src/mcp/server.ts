@@ -26,13 +26,15 @@ export function createMcpServer(manager = new TunnelToolManager()): {
     "open_channel",
     {
       description:
-        "Open an ACEP consultation channel and return a shareable connect_uri. Set expose_public=true to expose via cloudflared Quick Tunnel for external/VM access. In public mode, do not disclose private source code, credentials, or secrets.",
+        "Open an ACEP consultation channel and return a shareable connect_uri. Set transport='nostr' to use encrypted Nostr ephemeral events (acep+nostr://), or expose_public=true for cloudflared Quick Tunnel. In public mode, do not disclose private source code, credentials, or secrets.",
       inputSchema: {
         purpose: z.string(),
         trust_mode: TrustModeSchema,
         context_summary: z.string(),
         relay_url: z.string().optional(),
         expose_public: z.boolean().optional(),
+        transport: z.enum(["relay", "nostr"]).optional(),
+        nostr_relays: z.array(z.string()).optional(),
       },
     },
     async (args) => jsonTextResult(await manager.openChannel(args)),
