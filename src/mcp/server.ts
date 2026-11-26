@@ -65,6 +65,21 @@ export function createMcpServer(manager = new TunnelToolManager()): {
           .describe(
             "Optional list of Nostr relay WebSocket URLs (used when transport='nostr')",
           ),
+        max_turns: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Maximum host reply turns (NEED_INFO/ANSWER) before auto-closing the channel (default: 10)",
+          ),
+        ttl_sec: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Channel time-to-live in seconds before automatic expiration (default: 600)",
+          ),
       },
     },
     async (args) => jsonTextResult(await manager.openChannel(args)),

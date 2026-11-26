@@ -348,4 +348,91 @@ describe("TunnelToolManager (2-agent dialogue simulation)", () => {
       }),
     ).rejects.toThrow(/Cannot specify both relay_url and expose_public=true/);
   });
+
+  it("auto-closes host channel after max_turns replies", async () => {
+    const opened = await hostManager.openChannel({
+      purpose: "Limit turns test",
+      trust_mode: "public",
+      context_summary: "test",
+      max_turns: 2,
+    });
+    expect(opened.max_turns).toBe(2);
+
+    const waitHs = hostManager.waitForPeer({
+      channel_id: opened.channel_id,
+      timeout_sec: 5,
+    });
+    await seekerManager.connectChannel({ connect_uri: opened.connect_uri });
+    await waitHs;
+
+    const waitQ1 = hostManager.waitForPeer({
+      channel_id: opened.channel_id,
+      timeout_sec: 5,
+    });
+    const ask1 = seekerManager.askPeer({
+      channel_id: opened.channel_id,
+      type: "QUERY",
+      question: "Q1",
+      timeout_sec: 5,
+    });
+    const q1 = await waitQ1;
+    const r1 = await hostManager.replyToPeer({
+      channel_id: opened.channel_id,
+      reply_to: q1.message!.message_id,
+      type: "NEED_INFO",
+      content: { reason: "need more", requested_slots: ["os"] },
+    });
+    expect(r1.turns_remaining).toBe(1);
+    expect(r1.closed_by_limit).toBe(false);
+    await ask1;
+
+    const waitQ2 = hostManager.waitForPeer({
+      channel_id: opened.channel_id,
+      timeout_sec: 5,
+    });
+    const ask2 = seekerManager.askPeer({
+      channel_id: opened.channel_id,
+      type: "QUERY",
+      question: "Q2",
+      timeout_sec: 5,
+    });
+    const q2 = await waitQ2;
+    const r2 = await hostManager.replyToPeer({
+      channel_id: opened.channel_id,
+      reply_to: q2.message!.message_id,
+      type: "ANSWER",
+      content: { summary: "Final answer" },
+    });
+    expect(r2.turns_remaining).toBe(0);
+    expect(r2.closed_by_limit).toBe(true);
+
+    const a2 = await ask2;
+    expect(a2.message?.payload.summary).toBe("Final answer");
+
+    await expect(
+      hostManager.waitForPeer({
+        channel_id: opened.channel_id,
+        timeout_sec: 1,
+      }),
+    ).rejects.toThrow(/Unknown channel/);
+  });
+
+  it("expires host channel after ttl_sec", async () => {
+    const opened = await hostManager.openChannel({
+      purpose: "TTL expiration test",
+      trust_mode: "public",
+      context_summary: "test",
+      ttl_sec: 0.05,
+    });
+    expect(opened.ttl_sec).toBe(0.05);
+
+    await new Promise((r) => setTimeout(r, 80));
+
+    await expect(
+      hostManager.waitForPeer({
+        channel_id: opened.channel_id,
+        timeout_sec: 1,
+      }),
+    ).rejects.toThrow(/Unknown channel|Channel expired/);
+  });
 });

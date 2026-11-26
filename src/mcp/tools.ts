@@ -19,6 +19,9 @@ import { sanitizeForPublic } from "../security/sanitizer.js";
 
 export type ChannelTransportMode = "relay" | "nostr";
 
+export const DEFAULT_MAX_TURNS = 10;
+export const DEFAULT_TTL_SEC = 600;
+
 export type StartPublicTunnelFn = (
   localHttpUrl: string,
 ) => Promise<PublicTunnelHandle>;
@@ -33,6 +36,10 @@ interface ManagedChannel {
   trust_mode: TrustMode;
   purpose: string;
   client: TunnelTransport;
+  max_turns: number | null;
+  turns_used: number;
+  expires_at: number | null;
+  ttl_timer: ReturnType<typeof setTimeout> | null;
 }
 
 export interface WaitResult {
@@ -130,7 +137,51 @@ export class TunnelToolManager {
     if (!ch) {
       throw new Error(`Unknown channel: ${channelId}`);
     }
+    if (ch.expires_at !== null && Date.now() >= ch.expires_at) {
+      void this.closeChannel(channelId);
+      throw new Error(`Channel expired (TTL exceeded): ${channelId}`);
+    }
     return ch;
+  }
+
+  private async closeChannel(channelId: string): Promise<void> {
+    const ch = this.channels.get(channelId);
+    if (!ch) return;
+    if (ch.ttl_timer) {
+      clearTimeout(ch.ttl_timer);
+      ch.ttl_timer = null;
+    }
+    this.channels.delete(channelId);
+    await ch.client.close();
+  }
+
+  private registerHostChannel(params: {
+    channelId: string;
+    trustMode: TrustMode;
+    purpose: string;
+    client: TunnelTransport;
+    maxTurns: number;
+    ttlSec: number;
+  }): string {
+    const expiresAtMs = Date.now() + params.ttlSec * 1000;
+    const ttlTimer = setTimeout(() => {
+      void this.closeChannel(params.channelId);
+    }, params.ttlSec * 1000);
+    ttlTimer.unref?.();
+
+    this.channels.set(params.channelId, {
+      channel_id: params.channelId,
+      role: "host",
+      trust_mode: params.trustMode,
+      purpose: params.purpose,
+      client: params.client,
+      max_turns: params.maxTurns,
+      turns_used: 0,
+      expires_at: expiresAtMs,
+      ttl_timer: ttlTimer,
+    });
+
+    return new Date(expiresAtMs).toISOString();
   }
 
   private async awaitPeerMessage(
@@ -156,7 +207,25 @@ export class TunnelToolManager {
     expose_public?: boolean;
     transport?: ChannelTransportMode;
     nostr_relays?: string[];
-  }): Promise<{ channel_id: string; join_token: string; connect_uri: string }> {
+    max_turns?: number;
+    ttl_sec?: number;
+  }): Promise<{
+    channel_id: string;
+    join_token: string;
+    connect_uri: string;
+    max_turns: number;
+    ttl_sec: number;
+    expires_at: string;
+  }> {
+    const maxTurns = args.max_turns ?? DEFAULT_MAX_TURNS;
+    const ttlSec = args.ttl_sec ?? DEFAULT_TTL_SEC;
+    if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+      throw new Error(`Invalid max_turns "${maxTurns}": expected a positive integer`);
+    }
+    if (!Number.isFinite(ttlSec) || ttlSec <= 0) {
+      throw new Error(`Invalid ttl_sec "${ttlSec}": expected a positive number`);
+    }
+
     const transportMode: ChannelTransportMode = args.transport ?? "relay";
     if (transportMode === "nostr") {
       if (args.relay_url || args.expose_public) {
@@ -184,12 +253,13 @@ export class TunnelToolManager {
         joinToken,
       });
 
-      this.channels.set(channelId, {
-        channel_id: channelId,
-        role: "host",
-        trust_mode: args.trust_mode,
+      const expiresAt = this.registerHostChannel({
+        channelId,
+        trustMode: args.trust_mode,
         purpose,
         client: nostrClient,
+        maxTurns,
+        ttlSec,
       });
 
       const relayParams = relays
@@ -201,6 +271,9 @@ export class TunnelToolManager {
         channel_id: channelId,
         join_token: joinToken,
         connect_uri: connectUri,
+        max_turns: maxTurns,
+        ttl_sec: ttlSec,
+        expires_at: expiresAt,
       };
     }
 
@@ -232,12 +305,13 @@ export class TunnelToolManager {
       role: "host",
     });
 
-    this.channels.set(channelId, {
-      channel_id: channelId,
-      role: "host",
-      trust_mode: args.trust_mode,
+    const expiresAt = this.registerHostChannel({
+      channelId,
+      trustMode: args.trust_mode,
       purpose,
       client,
+      maxTurns,
+      ttlSec,
     });
 
     const scheme = publicParsedRelay.protocol === "wss:" ? "aceps" : "acep";
@@ -247,6 +321,9 @@ export class TunnelToolManager {
       channel_id: channelId,
       join_token: joinToken,
       connect_uri: connectUri,
+      max_turns: maxTurns,
+      ttl_sec: ttlSec,
+      expires_at: expiresAt,
     };
   }
 
@@ -270,7 +347,13 @@ export class TunnelToolManager {
     reply_to: string;
     type: "NEED_INFO" | "ANSWER" | "CLOSE";
     content: Record<string, unknown>;
-  }): Promise<{ sent: boolean; message_id: string; warnings: string[] }> {
+  }): Promise<{
+    sent: boolean;
+    message_id: string;
+    warnings: string[];
+    turns_remaining: number | null;
+    closed_by_limit: boolean;
+  }> {
     const ch = this.getChannel(args.channel_id);
 
     let payload = args.content;
@@ -291,7 +374,34 @@ export class TunnelToolManager {
     });
 
     await ch.client.send(msg);
-    return { sent: true, message_id: msg.message_id, warnings };
+
+    if (args.type === "CLOSE") {
+      await this.closeChannel(ch.channel_id);
+      return {
+        sent: true,
+        message_id: msg.message_id,
+        warnings,
+        turns_remaining:
+          ch.max_turns !== null ? Math.max(0, ch.max_turns - ch.turns_used) : null,
+        closed_by_limit: false,
+      };
+    }
+
+    ch.turns_used += 1;
+    const turnsRemaining =
+      ch.max_turns !== null ? Math.max(0, ch.max_turns - ch.turns_used) : null;
+    const reachedLimit = ch.max_turns !== null && ch.turns_used >= ch.max_turns;
+    if (reachedLimit) {
+      await this.closeChannel(ch.channel_id);
+    }
+
+    return {
+      sent: true,
+      message_id: msg.message_id,
+      warnings,
+      turns_remaining: turnsRemaining,
+      closed_by_limit: reachedLimit,
+    };
   }
 
   /**
@@ -329,8 +439,7 @@ export class TunnelToolManager {
 
     const previous = this.channels.get(channelId);
     if (previous) {
-      await previous.client.close();
-      this.channels.delete(channelId);
+      await this.closeChannel(channelId);
     }
 
     let client: TunnelTransport;
@@ -388,6 +497,10 @@ export class TunnelToolManager {
       trust_mode: trustMode,
       purpose,
       client,
+      max_turns: null,
+      turns_used: 0,
+      expires_at: null,
+      ttl_timer: null,
     });
 
     return {
@@ -444,10 +557,9 @@ export class TunnelToolManager {
    * Closes all managed channel clients and stops the local relay server if running.
    */
   async dispose(): Promise<void> {
-    for (const ch of this.channels.values()) {
-      await ch.client.close();
+    for (const channelId of Array.from(this.channels.keys())) {
+      await this.closeChannel(channelId);
     }
-    this.channels.clear();
     if (this.publicTunnel) {
       await this.publicTunnel.stop();
       this.publicTunnel = null;
