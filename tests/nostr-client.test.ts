@@ -4,7 +4,9 @@ import type { AddressInfo } from "node:net";
 import { generateSecretKey } from "nostr-tools/pure";
 import {
   ACEP_NOSTR_KIND,
+  NIP44_MAX_PLAINTEXT_BYTES,
   NostrTunnelClient,
+  ProxiedWebSocket,
 } from "../src/client/nostr-client.js";
 import { createAcepMessage } from "../src/protocol/types.js";
 import { TunnelToolManager } from "../src/mcp/tools.js";
@@ -255,5 +257,54 @@ describe("NostrTunnelClient & acep+nostr:// MCP flow", () => {
     expect(answerRes.message?.payload.summary).toBe(
       "Use --flash-attn (path ~/llama/run.sh)",
     );
+  });
+
+  it("attaches a no-op error listener on ProxiedWebSocket so closing before open does not crash", async () => {
+    const relay = await startMockNostrRelay();
+    relayStop = relay.stop;
+
+    const ws = new ProxiedWebSocket(relay.url);
+    expect(ws.listenerCount("error")).toBeGreaterThanOrEqual(1);
+    // Closing immediately before open triggers ws 'error' event; must not throw unhandled error
+    ws.close();
+    await new Promise((r) => setTimeout(r, 30));
+  });
+
+  it("throws a clear error when serialized payload exceeds NIP-44 64KB limit", async () => {
+    const relay = await startMockNostrRelay();
+    relayStop = relay.stop;
+
+    const host = new NostrTunnelClient();
+    const seeker = new NostrTunnelClient();
+
+    await host.connect({
+      relays: [relay.url],
+      role: "host",
+      channelId: "ch_size",
+      joinToken: "tok_size",
+    });
+
+    await seeker.connect({
+      relays: [relay.url],
+      role: "seeker",
+      channelId: "ch_size",
+      joinToken: "tok_size",
+      peerPubkey: host.pubkey,
+    });
+
+    const huge = "x".repeat(NIP44_MAX_PLAINTEXT_BYTES + 100);
+    await expect(
+      seeker.send(
+        createAcepMessage({
+          channel_id: "ch_size",
+          sender_role: "seeker",
+          type: "QUERY",
+          payload: { question: huge },
+        }),
+      ),
+    ).rejects.toThrow(/exceeds NIP-44 maximum plaintext limit/i);
+
+    await host.close();
+    await seeker.close();
   });
 });

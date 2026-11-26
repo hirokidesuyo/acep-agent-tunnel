@@ -17,13 +17,16 @@ import { createProxyAgent, resolveProxyUrl } from "./proxy-agent.js";
 import type { TunnelTransport } from "./transport.js";
 
 export const ACEP_NOSTR_KIND = 21337;
+export const NIP44_MAX_PLAINTEXT_BYTES = 65_535;
 
 export const DEFAULT_NOSTR_RELAYS = [
-  "wss://relay.damus.io",
   "wss://nos.lol",
+  "wss://relay.snort.social",
+  "wss://nostr.mom",
+  "wss://relay.damus.io",
 ];
 
-class ProxiedWebSocket extends WebSocket {
+export class ProxiedWebSocket extends WebSocket {
   constructor(
     address: string | URL,
     protocols?: string | string[] | ClientOptions,
@@ -39,19 +42,22 @@ class ProxiedWebSocket extends WebSocket {
       } else {
         super(address);
       }
-      return;
+    } else {
+      const agent = createProxyAgent(urlStr, proxyUrl);
+      if (typeof protocols === "object" && !Array.isArray(protocols)) {
+        super(address, { ...protocols, agent });
+      } else if (options !== undefined) {
+        super(address, protocols, { ...options, agent });
+      } else if (protocols !== undefined) {
+        super(address, protocols, { agent });
+      } else {
+        super(address, { agent });
+      }
     }
 
-    const agent = createProxyAgent(urlStr, proxyUrl);
-    if (typeof protocols === "object" && !Array.isArray(protocols)) {
-      super(address, { ...protocols, agent });
-    } else if (options !== undefined) {
-      super(address, protocols, { ...options, agent });
-    } else if (protocols !== undefined) {
-      super(address, protocols, { agent });
-    } else {
-      super(address, { agent });
-    }
+    // Prevent Node.js EventEmitter unhandled 'error' crashes when nostr-tools
+    // closes a socket before connection completes or a relay returns 503/timeout.
+    this.on("error", () => {});
   }
 }
 
@@ -201,8 +207,16 @@ export class NostrTunnelClient implements TunnelTransport {
           }
         : msg;
 
+    const plaintext = JSON.stringify(outgoing);
+    const byteLength = Buffer.byteLength(plaintext, "utf8");
+    if (byteLength > NIP44_MAX_PLAINTEXT_BYTES) {
+      throw new Error(
+        `ACEP message (${byteLength} bytes) exceeds NIP-44 maximum plaintext limit of ${NIP44_MAX_PLAINTEXT_BYTES} bytes. Keep context_slots concise or split into smaller queries.`,
+      );
+    }
+
     const convKey = nip44.getConversationKey(this.secretKey, this.peerPubkey);
-    const ciphertext = nip44.encrypt(JSON.stringify(outgoing), convKey);
+    const ciphertext = nip44.encrypt(plaintext, convKey);
 
     const signedEvent = finalizeEvent(
       {
