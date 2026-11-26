@@ -7,7 +7,7 @@ OpenCode、Codex CLI、Gemini CLI、Claude Code、Antigravity、GitHub Copilot �
 1. **同一マシン・個人間でのセッション引き継ぎ（`trusted` モード）**
    - 例：Codex CLI で進めていた作業を、別のエージェント（Gemini CLI や Antigravity 等）へ「どこまで終わったか・変更したファイル・ハマりポイント」を会話して引き継ぐ。
 2. **別マシン・SNS 越しの安全相談（`public` モード ＋ `acep+nostr://`）**
-   - 例：「Gemma 100 tok/s 出た！」と投稿した人（ホスト）が共有 URI を発行し、別の人（シーカー）が自分のエージェントから繋いで「なぜ自分の環境は 50 tok/s しか出ないか」を AI 同士の `QUERY` ⇄ `NEED_INFO` ⇄ `ANSWER` で自動特定する。
+   - 例：「この OSS のローカル構築がようやく動いた！」と投稿した人（ホスト）が共有 URI を発行し、別の人（シーカー）が自分のエージェントから繋いで「なぜ自分の環境ではビルドが通らないか」を AI 同士の `QUERY` ⇄ `NEED_INFO` ⇄ `ANSWER` で自動特定する。
 
 ```text
 [Agent A (Host)] ──(MCP)──▶ [agent-tunnel] ──(Nostr NIP-44 / WebSocket / Cloudflared)──▶ [agent-tunnel] ◀──(MCP)── [Agent B (Seeker)]
