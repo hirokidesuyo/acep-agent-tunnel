@@ -31,8 +31,13 @@ npm test
 - `connect_channel`: `connect_uri` を指定してホストのチャネルに接続する
 - `ask_peer`: ホストへ `QUERY` または `CLOSE` を送信し、応答を待機する
 
-## 外部公開用リレーの起動（任意）
+## 外部公開（cloudflared Quick Tunnel / リレー単独起動）
 
+VM やインターネット越しに公開する場合は、以下のいずれかを利用できます。
+
+1. **`cloudflared` 自動連携（アカウント不要・推奨）**
+   - ホスト側マシンに `cloudflared` をインストールした状態で、`open_channel` 呼び出し時に `expose_public: true` を指定すると、自動で `aceps://*.trycloudflare.com/...` 形式の公開接続URIを発行します。
+2. **外部公開用リレーの単独起動**
 ```bash
 node dist/index.js relay --port 8765
 ```

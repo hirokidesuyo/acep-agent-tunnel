@@ -5,8 +5,20 @@ import {
   type TrustMode,
 } from "../protocol/types.js";
 import { RelayServer } from "../relay/server.js";
+import {
+  startCloudflaredTunnel,
+  type PublicTunnelHandle,
+} from "../relay/cloudflared.js";
 import { TunnelClient } from "../client/tunnel-client.js";
 import { sanitizeForPublic } from "../security/sanitizer.js";
+
+export type StartPublicTunnelFn = (
+  localHttpUrl: string,
+) => Promise<PublicTunnelHandle>;
+
+export interface TunnelToolManagerOptions {
+  startPublicTunnel?: StartPublicTunnelFn;
+}
 
 interface ManagedChannel {
   channel_id: string;
@@ -29,7 +41,37 @@ export class TunnelToolManager {
   private localRelay: RelayServer | null = null;
   private localRelayUrl: string | null = null;
   private localRelayPromise: Promise<string> | null = null;
+  private publicTunnel: PublicTunnelHandle | null = null;
+  private publicTunnelPromise: Promise<PublicTunnelHandle> | null = null;
+  private readonly startPublicTunnel: StartPublicTunnelFn;
   private channels = new Map<string, ManagedChannel>();
+
+  constructor(options: TunnelToolManagerOptions = {}) {
+    this.startPublicTunnel =
+      options.startPublicTunnel ?? startCloudflaredTunnel;
+  }
+
+  private async ensurePublicTunnel(
+    localWsUrl: string,
+  ): Promise<PublicTunnelHandle> {
+    if (this.publicTunnel) {
+      return this.publicTunnel;
+    }
+    if (!this.publicTunnelPromise) {
+      const httpUrl = localWsUrl.replace(/^ws:/, "http:");
+      this.publicTunnelPromise = this.startPublicTunnel(httpUrl)
+        .then((handle) => {
+          this.publicTunnel = handle;
+          return handle;
+        })
+        .catch((err) => {
+          this.publicTunnel = null;
+          this.publicTunnelPromise = null;
+          throw err;
+        });
+    }
+    return this.publicTunnelPromise;
+  }
 
   private async ensureLocalRelay(): Promise<string> {
     if (this.localRelayUrl) {
@@ -104,9 +146,16 @@ export class TunnelToolManager {
     trust_mode: TrustMode;
     context_summary: string;
     relay_url?: string;
+    expose_public?: boolean;
   }): Promise<{ channel_id: string; join_token: string; connect_uri: string }> {
     const rawRelayUrl = args.relay_url ?? (await this.ensureLocalRelay());
     const { relayUrl, parsed: parsedRelay } = this.normalizeRelayUrl(rawRelayUrl);
+    let publicParsedRelay = parsedRelay;
+    if (!args.relay_url && args.expose_public) {
+      const tunnel = await this.ensurePublicTunnel(relayUrl);
+      const normalizedPublic = this.normalizeRelayUrl(tunnel.publicUrl);
+      publicParsedRelay = normalizedPublic.parsed;
+    }
     const channelId = `ch_${randomBytes(6).toString("hex")}`;
     const joinToken = `tok_${randomBytes(12).toString("hex")}`;
     const purpose =
@@ -130,8 +179,8 @@ export class TunnelToolManager {
       client,
     });
 
-    const scheme = parsedRelay.protocol === "wss:" ? "aceps" : "acep";
-    const connectUri = `${scheme}://${parsedRelay.host}/${channelId}?token=${joinToken}&trust=${args.trust_mode}&purpose=${encodeURIComponent(purpose)}`;
+    const scheme = publicParsedRelay.protocol === "wss:" ? "aceps" : "acep";
+    const connectUri = `${scheme}://${publicParsedRelay.host}/${channelId}?token=${joinToken}&trust=${args.trust_mode}&purpose=${encodeURIComponent(purpose)}`;
 
     return {
       channel_id: channelId,
@@ -312,6 +361,11 @@ export class TunnelToolManager {
       await ch.client.close();
     }
     this.channels.clear();
+    if (this.publicTunnel) {
+      await this.publicTunnel.stop();
+      this.publicTunnel = null;
+    }
+    this.publicTunnelPromise = null;
     if (this.localRelay) {
       await this.localRelay.stop();
       this.localRelay = null;

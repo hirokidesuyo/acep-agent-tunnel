@@ -303,4 +303,37 @@ describe("TunnelToolManager (2-agent dialogue simulation)", () => {
     const decodedPurpose = parsed.searchParams.get("purpose");
     expect(decodedPurpose).toBe("Debug ~/secret with [REDACTED_SECRET]");
   });
+
+  it("exposes an aceps:// URI via cloudflared when expose_public is true and stops it on dispose", async () => {
+    let stopped = false;
+    let receivedLocalUrl = "";
+    const publicManager = new TunnelToolManager({
+      startPublicTunnel: async (localHttpUrl) => {
+        receivedLocalUrl = localHttpUrl;
+        return {
+          publicUrl: "https://vm-host-test.trycloudflare.com",
+          stop: async () => {
+            stopped = true;
+          },
+        };
+      },
+    });
+
+    try {
+      const opened = await publicManager.openChannel({
+        purpose: "VM to agy test",
+        trust_mode: "public",
+        context_summary: "testing cloudflared",
+        expose_public: true,
+      });
+
+      expect(receivedLocalUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(opened.connect_uri).toMatch(
+        /^aceps:\/\/vm-host-test\.trycloudflare\.com\/ch_/,
+      );
+    } finally {
+      await publicManager.dispose();
+    }
+    expect(stopped).toBe(true);
+  });
 });
