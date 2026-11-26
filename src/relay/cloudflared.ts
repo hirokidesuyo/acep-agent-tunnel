@@ -16,7 +16,8 @@ export interface StartCloudflaredOptions {
   spawnFn?: SpawnTunnelProcess;
 }
 
-const TRY_CLOUDFLARE_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/i;
+const TRY_CLOUDFLARE_URL_RE =
+  /https:\/\/(?!api\.trycloudflare\.com\b)[a-z0-9-]+\.trycloudflare\.com\b/i;
 
 /**
  * Starts a `cloudflared tunnel --url <localHttpUrl>` Quick Tunnel process
@@ -100,6 +101,9 @@ export async function startCloudflaredTunnel(
       if (match && !settled) {
         settled = true;
         cleanupListeners();
+        // Keep draining stdout/stderr so cloudflared never blocks on a full pipe buffer
+        child.stdout?.resume?.();
+        child.stderr?.resume?.();
         resolve({
           publicUrl: match[0],
           stop,

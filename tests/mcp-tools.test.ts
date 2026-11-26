@@ -336,4 +336,16 @@ describe("TunnelToolManager (2-agent dialogue simulation)", () => {
     }
     expect(stopped).toBe(true);
   });
+
+  it("rejects combining relay_url and expose_public=true", async () => {
+    await expect(
+      hostManager.openChannel({
+        purpose: "Invalid combination",
+        trust_mode: "public",
+        context_summary: "test",
+        relay_url: "wss://relay.example.com",
+        expose_public: true,
+      }),
+    ).rejects.toThrow(/Cannot specify both relay_url and expose_public=true/);
+  });
 });

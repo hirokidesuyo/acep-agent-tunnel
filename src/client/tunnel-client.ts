@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import { AcepMessageSchema, type AcepMessage, type SenderRole } from "../protocol/types.js";
+import { createProxyAgent, resolveProxyUrl } from "./proxy-agent.js";
 
 export class TunnelClient {
   private ws: WebSocket | null = null;
@@ -11,12 +12,17 @@ export class TunnelClient {
     channelId: string;
     token: string;
     role: SenderRole;
+    proxyUrl?: string | null;
   }): Promise<void> {
     const base = params.relayUrl.replace(/\/$/, "");
     const wsUrl = `${base}/?channel_id=${encodeURIComponent(params.channelId)}&token=${encodeURIComponent(params.token)}&role=${params.role}`;
 
+    const proxyUrl =
+      params.proxyUrl !== undefined ? params.proxyUrl : resolveProxyUrl(wsUrl);
+    const agent = proxyUrl ? createProxyAgent(wsUrl, proxyUrl) : undefined;
+
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(wsUrl);
+      const ws = agent ? new WebSocket(wsUrl, { agent }) : new WebSocket(wsUrl);
       let settled = false;
 
       ws.once("open", () => {

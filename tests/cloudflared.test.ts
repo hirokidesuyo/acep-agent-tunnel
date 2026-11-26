@@ -5,14 +5,30 @@ import { startCloudflaredTunnel } from "../src/relay/cloudflared.js";
 
 function createMockChildProcess() {
   const proc = new EventEmitter() as unknown as ChildProcess & {
-    stdout: EventEmitter;
-    stderr: EventEmitter;
+    stdout: EventEmitter & { resume: () => void; resumed?: boolean };
+    stderr: EventEmitter & { resume: () => void; resumed?: boolean };
     exitCode: number | null;
     killed: boolean;
     kill: (signal?: NodeJS.Signals | number) => boolean;
   };
-  (proc as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
-  (proc as unknown as { stderr: EventEmitter }).stderr = new EventEmitter();
+  const stdout = new EventEmitter() as EventEmitter & {
+    resume: () => void;
+    resumed: boolean;
+  };
+  stdout.resumed = false;
+  stdout.resume = () => {
+    stdout.resumed = true;
+  };
+  const stderr = new EventEmitter() as EventEmitter & {
+    resume: () => void;
+    resumed: boolean;
+  };
+  stderr.resumed = false;
+  stderr.resume = () => {
+    stderr.resumed = true;
+  };
+  (proc as unknown as { stdout: EventEmitter }).stdout = stdout;
+  (proc as unknown as { stderr: EventEmitter }).stderr = stderr;
   (proc as unknown as { exitCode: number | null }).exitCode = null;
   (proc as unknown as { killed: boolean }).killed = false;
   proc.kill = () => {
@@ -44,9 +60,32 @@ describe("startCloudflaredTunnel", () => {
 
     const handle = await handlePromise;
     expect(handle.publicUrl).toBe("https://gentle-river-42.trycloudflare.com");
+    expect(mockProc.stdout.resumed).toBe(true);
+    expect(mockProc.stderr.resumed).toBe(true);
 
     await handle.stop();
     expect(mockProc.killed).toBe(true);
+  });
+
+  it("does not misidentify api.trycloudflare.com error logs as a valid tunnel URL", async () => {
+    const mockProc = createMockChildProcess();
+
+    const handlePromise = startCloudflaredTunnel("http://127.0.0.1:8765", {
+      spawnFn: () => mockProc,
+      timeoutMs: 2000,
+    });
+
+    mockProc.stderr.emit(
+      "data",
+      Buffer.from(
+        'ERR Failed to create tunnel error="Post \\"https://api.trycloudflare.com/tunnel\\": dial tcp: i/o timeout"\n',
+      ),
+    );
+    mockProc.emit("exit", 1, null);
+
+    await expect(handlePromise).rejects.toThrow(
+      /exited before providing a tunnel URL/,
+    );
   });
 
   it("throws a helpful error when cloudflared binary is missing (ENOENT)", async () => {

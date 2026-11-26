@@ -148,6 +148,11 @@ export class TunnelToolManager {
     relay_url?: string;
     expose_public?: boolean;
   }): Promise<{ channel_id: string; join_token: string; connect_uri: string }> {
+    if (args.relay_url && args.expose_public) {
+      throw new Error(
+        "Cannot specify both relay_url and expose_public=true",
+      );
+    }
     const rawRelayUrl = args.relay_url ?? (await this.ensureLocalRelay());
     const { relayUrl, parsed: parsedRelay } = this.normalizeRelayUrl(rawRelayUrl);
     let publicParsedRelay = parsedRelay;
