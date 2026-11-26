@@ -1,0 +1,26 @@
+{
+  "name": "agent-tunnel",
+  "version": "0.1.0",
+  "description": "ACEP (Agent Context Exchange Protocol) & MCP bridge for agent-to-agent dialogue",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-tunnel": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.14",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}
